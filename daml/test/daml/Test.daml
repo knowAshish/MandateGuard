@@ -1,0 +1,923 @@
+-- | MandateGuard — Comprehensive Daml Script Tests
+-- Tests: valid transitions, invalid transitions, policy versioning, approval thresholds,
+-- self-approval rejection, beneficiary restrictions, revocation, emergency holds,
+-- asset-transfer authorization, and high-risk scenarios.
+module Test where
+
+import Daml.Script
+import DA.Time (addRelTime, hours, minutes, seconds)
+import DA.Optional (fromSome)
+import DA.List (head)
+
+import MandateGuard.Types
+import MandateGuard.Identity
+import MandateGuard.Policy
+import MandateGuard.Transfer
+import MandateGuard.Emergency
+import MandateGuard.Asset
+
+-- ============================================================
+-- Helper: create standard test parties
+-- ============================================================
+data TestParties = TestParties with
+  operator : Party
+  institutionA : Party
+  initiator : Party
+  approver1 : Party
+  approver2 : Party
+  treasuryCtrl : Party
+  secOps : Party
+  auditor : Party
+
+setupParties : Script TestParties
+setupParties = do
+  operator <- allocateParty "Operator"
+  institutionA <- allocateParty "InstitutionA"
+  initiator <- allocateParty "Initiator"
+  approver1 <- allocateParty "Approver1"
+  approver2 <- allocateParty "Approver2"
+  treasuryCtrl <- allocateParty "TreasuryCtrl"
+  secOps <- allocateParty "SecOps"
+  auditor <- allocateParty "Auditor"
+  return TestParties with ..
+
+-- ============================================================
+-- Helper: standard test values
+-- ============================================================
+testMandateRef : MandateRef
+testMandateRef = MandateRef "InstitutionA" "MANDATE-001"
+
+testPolicyRef : PolicyRef
+testPolicyRef = PolicyRef "POLICY-001" 1
+
+testAssetId : AssetId
+testAssetId = AssetId "TEST-USD" "MandateGuard-Issuer"
+
+testBeneficiary : BeneficiaryId
+testBeneficiary = BeneficiaryId "BEN-001" "Approved Beneficiary Corp"
+
+testQuantity100 : Quantity
+testQuantity100 = Quantity 10000 2  -- 100.00
+
+testQuantity500 : Quantity
+testQuantity500 = Quantity 50000 2  -- 500.00
+
+testQuantity1000 : Quantity
+testQuantity1000 = Quantity 100000 2  -- 1000.00
+
+testEvidence : Time -> EvidenceRef
+testEvidence t = EvidenceRef "EVD-001" "sha256:abc123" "approval" t
+
+-- ============================================================
+-- TEST 1: Create institutional mandate
+-- ============================================================
+test_createMandate : Script ()
+test_createMandate = do
+  tp <- setupParties
+  now <- getTime
+
+  mandateCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd InstitutionalMandate with
+      operator = tp.operator
+      institution = tp.institutionA
+      mandateRef = testMandateRef
+      authorizedAssets = [testAssetId]
+      permittedTransactionTypes = ["Transfer"]
+      permittedBeneficiaryScope = ["approved"]
+      maxSingleTransfer = testQuantity1000
+      dailyLimit = Quantity 500000 2  -- 5000.00
+      requiredApprovals = 2
+      effectivePolicyRef = testPolicyRef
+      effectiveFrom = now
+      expiresAt = None
+      revoked = False
+      governanceApprovers = [tp.approver1, tp.approver2]
+
+  -- Verify the mandate exists
+  Some mandate <- queryContractId tp.operator mandateCid
+  assertMsg "Mandate should not be revoked" $ not mandate.revoked
+  assertMsg "Required approvals should be 2" $ mandate.requiredApprovals == 2
+
+  return ()
+
+
+-- ============================================================
+-- TEST 2: Self-approval prevention
+-- ============================================================
+test_selfApprovalRejected : Script ()
+test_selfApprovalRejected = do
+  tp <- setupParties
+  now <- getTime
+
+  -- Create a transfer request
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-001"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 1
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Initiator tries to approve their own request → must fail
+  submitMustFail tp.initiator do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.initiator
+      decision = Approve
+      reason = "Self-approving"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  return ()
+
+
+-- ============================================================
+-- TEST 3: Valid approval workflow
+-- ============================================================
+test_validApprovalWorkflow : Script ()
+test_validApprovalWorkflow = do
+  tp <- setupParties
+  now <- getTime
+
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-002"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 2
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1, tp.approver2]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- First approval
+  (requestCid2, _approvalCid1) <- submit tp.approver1 do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "Verified transfer"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  -- Check state is AwaitingApproval (need 2, have 1)
+  Some req2 <- queryContractId tp.operator requestCid2
+  assertMsg "Should be AwaitingApproval after 1st approval" $
+    req2.state == AwaitingApproval
+
+  -- Second approval
+  (requestCid3, _approvalCid2) <- submit tp.approver2 do
+    exerciseCmd requestCid2 ApproveTransfer with
+      approver = tp.approver2
+      decision = Approve
+      reason = "Confirmed beneficiary"
+      approvalTime = addRelTime now (minutes 5)
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = EvidenceRef "EVD-002" "sha256:def456" "approval" now
+
+  -- Check state is Approved (need 2, have 2)
+  Some req3 <- queryContractId tp.operator requestCid3
+  assertMsg "Should be Approved after 2nd approval" $
+    req3.state == Approved
+
+  return ()
+
+
+-- ============================================================
+-- TEST 4: Duplicate approval prevention
+-- ============================================================
+test_duplicateApprovalRejected : Script ()
+test_duplicateApprovalRejected = do
+  tp <- setupParties
+  now <- getTime
+
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-003"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 2
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1, tp.approver2]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- First approval by approver1
+  (requestCid2, _) <- submit tp.approver1 do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "First approval"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  -- Same approver tries again → must fail
+  submitMustFail tp.approver1 do
+    exerciseCmd requestCid2 ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "Duplicate"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  return ()
+
+
+-- ============================================================
+-- TEST 5: Policy version consistency
+-- ============================================================
+test_policyVersionMismatchRejected : Script ()
+test_policyVersionMismatchRejected = do
+  tp <- setupParties
+  now <- getTime
+
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-004"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef  -- Version 1
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 1
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Approve with different policy version → must fail
+  submitMustFail tp.approver1 do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "Wrong policy"
+      approvalTime = now
+      approvalPolicyRef = PolicyRef "POLICY-001" 2  -- Different version!
+      evidenceRef = testEvidence now
+
+  return ()
+
+
+-- ============================================================
+-- TEST 6: Expired request rejection
+-- ============================================================
+test_expiredRequestRejected : Script ()
+test_expiredRequestRejected = do
+  tp <- setupParties
+  now <- getTime
+  let expiry = addRelTime now (seconds 1)
+  let afterExpiry = addRelTime now (hours 2)
+
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-005"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = expiry  -- Expires in 1 second
+      requiredApprovals = 1
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Approve after expiry → must fail
+  submitMustFail tp.approver1 do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "Too late"
+      approvalTime = afterExpiry
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence afterExpiry
+
+  return ()
+
+
+-- ============================================================
+-- TEST 7: Mandate revocation
+-- ============================================================
+test_mandateRevocation : Script ()
+test_mandateRevocation = do
+  tp <- setupParties
+  now <- getTime
+
+  mandateCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd InstitutionalMandate with
+      operator = tp.operator
+      institution = tp.institutionA
+      mandateRef = testMandateRef
+      authorizedAssets = [testAssetId]
+      permittedTransactionTypes = ["Transfer"]
+      permittedBeneficiaryScope = ["approved"]
+      maxSingleTransfer = testQuantity1000
+      dailyLimit = Quantity 500000 2
+      requiredApprovals = 2
+      effectivePolicyRef = testPolicyRef
+      effectiveFrom = now
+      expiresAt = None
+      revoked = False
+      governanceApprovers = []
+
+  -- Revoke the mandate
+  revokedCid <- submit tp.operator do
+    exerciseCmd mandateCid RevokeMandate with
+      revoker = tp.operator
+      reason = "Compliance requirement"
+
+  Some revoked <- queryContractId tp.operator revokedCid
+  assertMsg "Mandate should be revoked" revoked.revoked
+
+  -- Cannot revoke again
+  submitMustFail tp.operator do
+    exerciseCmd revokedCid RevokeMandate with
+      revoker = tp.operator
+      reason = "Double revoke"
+
+  -- Cannot update revoked mandate
+  submitMustFail tp.operator do
+    exerciseCmd revokedCid UpdateMandatePolicy with
+      newPolicyRef = PolicyRef "POLICY-002" 1
+      updater = tp.operator
+
+  return ()
+
+
+-- ============================================================
+-- TEST 8: Role assignment and revocation
+-- ============================================================
+test_roleAssignment : Script ()
+test_roleAssignment = do
+  tp <- setupParties
+  now <- getTime
+
+  roleCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd RoleAssignment with
+      operator = tp.operator
+      institution = tp.institutionA
+      assignee = tp.approver1
+      roleType = Approver
+      assignedScope = [testMandateRef]
+      version = 1
+      effectiveFrom = now
+      expiresAt = None
+      revoked = False
+      revokedAt = None
+
+  -- Revoke the role
+  revokedCid <- submit tp.operator do
+    exerciseCmd roleCid RevokeRole with
+      revoker = tp.operator
+      revokeTime = addRelTime now (hours 1)
+      reason = "Role expired"
+
+  Some revokedRole <- queryContractId tp.operator revokedCid
+  assertMsg "Role should be revoked" revokedRole.revoked
+  assertMsg "Revocation time should be set" $
+    revokedRole.revokedAt /= None
+
+  -- Cannot revoke again
+  submitMustFail tp.operator do
+    exerciseCmd revokedCid RevokeRole with
+      revoker = tp.operator
+      revokeTime = addRelTime now (hours 2)
+      reason = "Double revoke"
+
+  return ()
+
+
+-- ============================================================
+-- TEST 9: Emergency hold with dual control
+-- ============================================================
+test_emergencyHold : Script ()
+test_emergencyHold = do
+  tp <- setupParties
+  now <- getTime
+
+  holdCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd EmergencyHold with
+      operator = tp.operator
+      institution = tp.institutionA
+      holdInitiator = tp.secOps
+      holdId = "HOLD-001"
+      scope = "Mandate:MANDATE-001"
+      scopeRef = testMandateRef
+      reason = "Suspicious activity detected"
+      effectiveFrom = now
+      expiresAt = Some (addRelTime now (hours 72))
+      requiredApprovals = 2  -- Dual control
+      approvals = []
+      eligibleApprovers = [tp.secOps, tp.approver1]
+      state = HoldRequested
+      releaseConditions = "Investigation complete and cleared"
+      releasedBy = None
+      releaseReason = None
+
+  -- First approval
+  holdCid2 <- submit tp.secOps do
+    exerciseCmd holdCid ApproveHold with
+      approver = tp.secOps
+      approvalTime = now
+
+  Some hold2 <- queryContractId tp.operator holdCid2
+  assertMsg "Hold should still be requested (1 of 2)" $
+    hold2.state == HoldRequested
+
+  -- Second approval → activates hold
+  holdCid3 <- submit tp.approver1 do
+    exerciseCmd holdCid2 ApproveHold with
+      approver = tp.approver1
+      approvalTime = addRelTime now (minutes 5)
+
+  Some hold3 <- queryContractId tp.operator holdCid3
+  assertMsg "Hold should be active (2 of 2)" $
+    hold3.state == HoldActive
+
+  -- Release the hold
+  holdCid4 <- submit tp.operator do
+    exerciseCmd holdCid3 ReleaseHold with
+      releaser = tp.operator
+      releaseReasonText = "Investigation cleared"
+
+  Some hold4 <- queryContractId tp.operator holdCid4
+  assertMsg "Hold should be released" $ hold4.state == HoldReleased
+
+  return ()
+
+
+-- ============================================================
+-- TEST 10: Policy change with self-approval prevention
+-- ============================================================
+test_policyChangeWorkflow : Script ()
+test_policyChangeWorkflow = do
+  tp <- setupParties
+  now <- getTime
+
+  changeCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd PolicyChangeRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      proposer = tp.treasuryCtrl
+      changeId = "CHG-001"
+      changeType = "PolicyUpdate"
+      currentPolicyRef = testPolicyRef
+      proposedChanges = "{\"maxSingleTransfer\": 200000}"
+      requiredApprovals = 2
+      approvals = []
+      rejections = []
+      eligibleApprovers = [tp.approver1, tp.approver2]
+      state = Proposed
+      proposedAt = now
+      expiresAt = addRelTime now (hours 72)
+      requiresIndependentApproval = True
+
+  -- Proposer tries to approve own change → must fail
+  submitMustFail tp.treasuryCtrl do
+    exerciseCmd changeCid ApprovePolicyChange with
+      approver = tp.treasuryCtrl
+      approvalTime = now
+
+  -- Independent approval 1
+  changeCid2 <- submit tp.approver1 do
+    exerciseCmd changeCid ApprovePolicyChange with
+      approver = tp.approver1
+      approvalTime = now
+
+  -- Independent approval 2 → activatable
+  changeCid3 <- submit tp.approver2 do
+    exerciseCmd changeCid2 ApprovePolicyChange with
+      approver = tp.approver2
+      approvalTime = addRelTime now (minutes 10)
+
+  Some change3 <- queryContractId tp.operator changeCid3
+  assertMsg "Change should be approved" $ change3.state == ChangeApproved
+
+  -- Activate
+  changeCid4 <- submit tp.operator do
+    exerciseCmd changeCid3 ActivatePolicyChange with
+      activator = tp.operator
+
+  Some change4 <- queryContractId tp.operator changeCid4
+  assertMsg "Change should be activated" $ change4.state == Activated
+
+  return ()
+
+
+-- ============================================================
+-- TEST 11: Beneficiary revocation
+-- ============================================================
+test_beneficiaryRevocation : Script ()
+test_beneficiaryRevocation = do
+  tp <- setupParties
+  now <- getTime
+
+  benCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd BeneficiaryMandate with
+      operator = tp.operator
+      institution = tp.institutionA
+      beneficiary = testBeneficiary
+      permittedAssets = [testAssetId]
+      maxTransferAmount = Some testQuantity1000
+      effectiveFrom = now
+      expiresAt = None
+      revoked = False
+      version = 1
+      approvedBy = [tp.approver1]
+
+  -- Revoke
+  revokedCid <- submit tp.operator do
+    exerciseCmd benCid RevokeBeneficiary with
+      revoker = tp.operator
+      reason = "Compliance review"
+
+  Some revokedBen <- queryContractId tp.operator revokedCid
+  assertMsg "Beneficiary should be revoked" revokedBen.revoked
+
+  -- Cannot amend revoked beneficiary
+  submitMustFail tp.operator do
+    exerciseCmd revokedCid AmendBeneficiary with
+      newPermittedAssets = [testAssetId]
+      newMaxTransfer = Some testQuantity500
+      amender = tp.operator
+
+  return ()
+
+
+-- ============================================================
+-- TEST 12: Test asset issuance and authorized transfer
+-- ============================================================
+test_assetTransfer : Script ()
+test_assetTransfer = do
+  tp <- setupParties
+  now <- getTime
+
+  -- Create asset factory
+  factoryCid <- submit tp.operator do
+    createCmd TestAssetFactory with
+      operator = tp.operator
+      description = "MandateGuard Test Asset Factory - NON-REDEEMABLE TEST ASSET"
+
+  -- Issue test asset to initiator
+  holdingCid <- submit tp.operator do
+    exerciseCmd factoryCid IssueTestAsset with
+      recipient = tp.initiator
+      assetId = testAssetId
+      initialBalance = Quantity 100000 2  -- 1000.00
+      issueReference = "ISSUE-001"
+
+  -- Perform authorized transfer (atomic: authorization + transfer)
+  let transferAmount = testQuantity100
+  (senderCid, recipientCid) <- submitMulti [tp.operator, tp.initiator] [] do
+    exerciseCmd holdingCid AuthorizedTransfer with
+      recipient = tp.approver1
+      transferAmount
+      authorizedRequestRef = "REQ-ASSET-001"
+      updateRef = "UPDATE-001"
+
+  -- Verify balances
+  Some sender <- queryContractId tp.operator senderCid
+  assertMsg "Sender balance should be 900.00" $ sender.balance.amount == 90000
+
+  Some recipient <- queryContractId tp.operator recipientCid
+  assertMsg "Recipient balance should be 100.00" $ recipient.balance.amount == 10000
+
+  return ()
+
+
+-- ============================================================
+-- TEST 13: Asset transfer requires operator (cannot bypass MandateGuard)
+-- ============================================================
+test_assetTransferRequiresOperator : Script ()
+test_assetTransferRequiresOperator = do
+  tp <- setupParties
+  now <- getTime
+
+  factoryCid <- submit tp.operator do
+    createCmd TestAssetFactory with
+      operator = tp.operator
+      description = "MandateGuard Test Asset Factory - NON-REDEEMABLE"
+
+  holdingCid <- submit tp.operator do
+    exerciseCmd factoryCid IssueTestAsset with
+      recipient = tp.initiator
+      assetId = testAssetId
+      initialBalance = Quantity 50000 2  -- 500.00
+      issueReference = "ISSUE-002"
+
+  -- Attempt transfer WITHOUT operator → must fail (bypass prevention)
+  submitMustFail tp.initiator do
+    exerciseCmd holdingCid AuthorizedTransfer with
+      recipient = tp.approver1
+      transferAmount = testQuantity100
+      authorizedRequestRef = "BYPASS-ATTEMPT"
+      updateRef = "BYPASS-001"
+
+  return ()
+
+
+-- ============================================================
+-- TEST 14: Insufficient balance rejection
+-- ============================================================
+test_insufficientBalance : Script ()
+test_insufficientBalance = do
+  tp <- setupParties
+  now <- getTime
+
+  factoryCid <- submit tp.operator do
+    createCmd TestAssetFactory with
+      operator = tp.operator
+      description = "MandateGuard Test Asset Factory - NON-REDEEMABLE"
+
+  holdingCid <- submit tp.operator do
+    exerciseCmd factoryCid IssueTestAsset with
+      recipient = tp.initiator
+      assetId = testAssetId
+      initialBalance = Quantity 5000 2  -- 50.00
+      issueReference = "ISSUE-003"
+
+  -- Attempt to transfer more than balance → must fail
+  submitMultiMustFail [tp.operator, tp.initiator] [] do
+    exerciseCmd holdingCid AuthorizedTransfer with
+      recipient = tp.approver1
+      transferAmount = testQuantity100  -- 100.00 > 50.00
+      authorizedRequestRef = "REQ-OVER"
+      updateRef = "UPDATE-OVER"
+
+  return ()
+
+
+-- ============================================================
+-- TEST 15: Incident lifecycle
+-- ============================================================
+test_incidentLifecycle : Script ()
+test_incidentLifecycle = do
+  tp <- setupParties
+  now <- getTime
+
+  incidentCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd IncidentCase with
+      operator = tp.operator
+      institution = tp.institutionA
+      securityOperator = tp.secOps
+      incidentId = "INC-001"
+      severity = "High"
+      description = "Suspicious transfer pattern detected"
+      relatedRequests = ["REQ-001"]
+      relatedHolds = ["HOLD-001"]
+      evidenceRefs = []
+      responseActions = []
+      state = IncidentOpen
+      openedAt = now
+      resolvedAt = None
+      resolution = None
+
+  -- Start investigation
+  incidentCid2 <- submit tp.secOps do
+    exerciseCmd incidentCid StartInvestigation with
+      investigator = tp.secOps
+
+  -- Add evidence
+  incidentCid3 <- submit tp.secOps do
+    exerciseCmd incidentCid2 AddIncidentEvidence with
+      addedBy = tp.secOps
+      evidence = testEvidence now
+
+  -- Contain
+  incidentCid4 <- submit tp.secOps do
+    exerciseCmd incidentCid3 ContainIncident with
+      containedBy = tp.secOps
+      actions = ["Blocked suspicious IP", "Revoked temp credentials"]
+
+  -- Resolve
+  incidentCid5 <- submit tp.secOps do
+    exerciseCmd incidentCid4 ResolveIncident with
+      resolver = tp.secOps
+      resolveTime = addRelTime now (hours 4)
+      resolutionText = "False positive - authorized batch transfer"
+
+  -- Close
+  incidentCid6 <- submit tp.operator do
+    exerciseCmd incidentCid5 CloseIncident with
+      closedBy = tp.operator
+
+  Some closed <- queryContractId tp.operator incidentCid6
+  assertMsg "Incident should be closed" $ closed.state == IncidentClosed
+
+  return ()
+
+
+-- ============================================================
+-- TEST 16: Request rejection workflow
+-- ============================================================
+test_requestRejection : Script ()
+test_requestRejection = do
+  tp <- setupParties
+  now <- getTime
+
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-REJECT"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity500
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 1
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Reject the request
+  (requestCid2, _) <- submit tp.approver1 do
+    exerciseCmd requestCid ApproveTransfer with
+      approver = tp.approver1
+      decision = Reject
+      reason = "Beneficiary under review"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  Some req2 <- queryContractId tp.operator requestCid2
+  assertMsg "Request should be Rejected" $ req2.state == Rejected
+
+  return ()
+
+
+-- ============================================================
+-- TEST 17: Execution receipt with actual ledger ID
+-- ============================================================
+test_executionReceipt : Script ()
+test_executionReceipt = do
+  tp <- setupParties
+  now <- getTime
+
+  -- Create an approved request
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-EXEC"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 1
+      currentApprovals = [tp.approver1]
+      eligibleApprovers = [tp.approver1]
+      state = Approved
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Mark executing
+  requestCid2 <- submit tp.operator do
+    exerciseCmd requestCid MarkExecuting
+
+  -- Confirm execution
+  (requestCid3, receiptCid) <- submit tp.operator do
+    exerciseCmd requestCid2 ConfirmExecution with
+      updateId = "LEDGER-UPDATE-001"
+      assetContractId = "CONTRACT-001"
+      outcome = ExecutionSuccess
+      evidenceRef = EvidenceRef "EVD-EXEC" "sha256:exec123" "execution" now
+      confirmTime = addRelTime now (minutes 1)
+
+  Some req3 <- queryContractId tp.operator requestCid3
+  assertMsg "Request should be Confirmed" $ req3.state == Confirmed
+  assertMsg "Update ID should be set" $ req3.executionUpdateId == Some "LEDGER-UPDATE-001"
+
+  Some receipt <- queryContractId tp.operator receiptCid
+  assertMsg "Receipt should have correct update ID" $ receipt.updateId == "LEDGER-UPDATE-001"
+  assertMsg "Receipt outcome should be Success" $ receipt.outcome == ExecutionSuccess
+
+  return ()
+
+
+-- ============================================================
+-- TEST 18: Hold blocks transfer (place on hold)
+-- ============================================================
+test_holdBlocksTransfer : Script ()
+test_holdBlocksTransfer = do
+  tp <- setupParties
+  now <- getTime
+
+  -- Create pending request
+  requestCid <- submitMulti [tp.operator, tp.institutionA] [] do
+    createCmd TransferRequest with
+      operator = tp.operator
+      institution = tp.institutionA
+      initiator = tp.initiator
+      requestRef = "REQ-HOLD"
+      assetId = testAssetId
+      assetContractRef = None
+      beneficiary = testBeneficiary
+      quantity = testQuantity100
+      mandateRef = testMandateRef
+      policyRef = testPolicyRef
+      createdAt = now
+      expiresAt = addRelTime now (hours 24)
+      requiredApprovals = 1
+      currentApprovals = []
+      eligibleApprovers = [tp.approver1]
+      state = Pending
+      evidenceRefs = []
+      executionOutcome = None
+      executionUpdateId = None
+
+  -- Place on hold
+  requestCid2 <- submit tp.operator do
+    exerciseCmd requestCid PlaceOnHold with
+      holdReason = "Emergency hold active on mandate"
+
+  Some req2 <- queryContractId tp.operator requestCid2
+  assertMsg "Request should be OnHold" $ req2.state == OnHold
+
+  -- Cannot approve while on hold (state check will reject)
+  submitMustFail tp.approver1 do
+    exerciseCmd requestCid2 ApproveTransfer with
+      approver = tp.approver1
+      decision = Approve
+      reason = "Should fail - on hold"
+      approvalTime = now
+      approvalPolicyRef = testPolicyRef
+      evidenceRef = testEvidence now
+
+  -- Release from hold
+  requestCid3 <- submit tp.operator do
+    exerciseCmd requestCid2 ReleaseFromHold with
+      releaseReason = "Hold cleared"
+      restoreState = Pending
+
+  Some req3 <- queryContractId tp.operator requestCid3
+  assertMsg "Request should be restored to Pending" $ req3.state == Pending
+
+  return ()

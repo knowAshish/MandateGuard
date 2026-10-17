@@ -1,0 +1,68 @@
+# Dependency directories
+node_modules/
+.pnp
+.pnp.js
+
+# Production and build outputs
+dist/
+**/dist/
+build/
+**/build/
+*.dar
+
+# Daml compiler artifacts
+.daml/
+daml/**/.daml/
+
+# Environment files and credentials (CRITICAL: never commit secrets)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# Logs and debug output
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+.system_generated/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE and Editor configurations
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.agents/
+
+# Testing and coverage
+coverage/
+.nyc_output/
+
+# Docker and local storage volumes
+pgdata/
+*.sqlite
+*.db
+
+# Local environment overrides
+.env.*
+!.env.example
+
+# Replace with your actual Canton participant endpoint
+CANTON_LEDGER_BASE_URL=https://YOUR_PARTICIPANT_ENDPOINT
+
+# Add a real token only to your local .env file
+CANTON_LEDGER_TOKEN=
+
+# Replace with valid party identifiers from your environment
+OPERATOR_PARTY=REPLACE_WITH_OPERATOR_PARTY_ID
+INSTITUTION_PARTY=REPLACE_WITH_INSTITUTION_PARTY_ID
+
+# Generated Daml JavaScript/TypeScript bindings
+packages/daml-ledger/

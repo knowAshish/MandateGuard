@@ -1,0 +1,142 @@
+-- | MandateGuard Domain Types
+-- Core shared data types for the institutional transaction authorization platform.
+module MandateGuard.Types where
+
+-- | Unique reference for an institutional mandate.
+data MandateRef = MandateRef
+  with
+    institution : Text
+    mandateId : Text
+  deriving (Eq, Show, Ord)
+
+-- | Unique reference for a policy version.
+data PolicyRef = PolicyRef
+  with
+    policyId : Text
+    version : Int
+  deriving (Eq, Show, Ord)
+
+-- | Represents a monetary/asset quantity using integer sub-units to avoid floating-point.
+-- For example, USD cents: 10050 = $100.50 with precision 2.
+data Quantity = Quantity
+  with
+    amount : Int        -- Amount in smallest sub-units
+    precision : Int     -- Number of decimal places (e.g., 2 for cents)
+  deriving (Eq, Show, Ord)
+
+-- | Asset identifier with type and denomination info.
+data AssetId = AssetId
+  with
+    assetCode : Text
+    issuerRef : Text
+  deriving (Eq, Show, Ord)
+
+-- | Beneficiary identifier — not just a display name.
+data BeneficiaryId = BeneficiaryId
+  with
+    registryId : Text     -- Unique identifier in the beneficiary registry
+    displayName : Text
+  deriving (Eq, Show)
+
+-- | Transfer request state machine.
+data RequestState
+  = Pending
+  | AwaitingApproval
+  | Approved
+  | Executing
+  | Confirmed
+  | Rejected
+  | Expired
+  | OnHold
+  deriving (Eq, Show)
+
+-- | Policy change request state.
+data ChangeState
+  = Proposed
+  | UnderReview
+  | ChangeApproved
+  | ChangeRejected
+  | Activated
+  | ChangeExpired
+  deriving (Eq, Show)
+
+-- | Hold state.
+data HoldState
+  = HoldRequested
+  | HoldActive
+  | HoldReleased
+  | HoldExpired
+  deriving (Eq, Show)
+
+-- | Incident state.
+data IncidentState
+  = IncidentOpen
+  | IncidentInvestigating
+  | IncidentContained
+  | IncidentResolved
+  | IncidentClosed
+  deriving (Eq, Show)
+
+-- | Approval decision type.
+data ApprovalDecision
+  = Approve
+  | Reject
+  deriving (Eq, Show)
+
+-- | Authorization outcome.
+data AuthorizationOutcome
+  = Authorized
+  | Denied
+  | InsufficientApprovals
+  | PolicyViolation
+  | BeneficiaryViolation
+  | LimitExceeded
+  | HoldBlocked
+  | RequestExpired
+  | PolicyExpired
+  | ApproverRevoked
+  deriving (Eq, Show)
+
+-- | Execution outcome.
+data ExecutionOutcome
+  = ExecutionSuccess
+  | ExecutionFailed
+  | ExecutionUnknown
+  deriving (Eq, Show)
+
+-- | Role types for the platform.
+data RoleType
+  = Initiator
+  | Approver
+  | TreasuryController
+  | SecurityOperator
+  | PolicyAdministrator
+  | Auditor
+  | PlatformAdmin
+  deriving (Eq, Show)
+
+-- | Evidence reference for audit trail.
+data EvidenceRef = EvidenceRef
+  with
+    evidenceId : Text
+    evidenceHash : Text
+    evidenceType : Text
+    timestamp : Time
+  deriving (Eq, Show)
+
+-- | Reason code for decisions.
+data ReasonCode = ReasonCode
+  with
+    code : Text
+    description : Text
+  deriving (Eq, Show)
+
+-- | Limit check result.
+data LimitCheckResult = LimitCheckResult
+  with
+    limitType : Text
+    limitAmount : Quantity
+    currentUsage : Quantity
+    requestedAmount : Quantity
+    passed : Bool
+  deriving (Eq, Show)

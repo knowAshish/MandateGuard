@@ -1,0 +1,132 @@
+-- | MandateGuard — Policy Lifecycle
+-- Templates for PolicyVersion and PolicyChangeRequest.
+module MandateGuard.Policy where
+
+import MandateGuard.Types
+
+-- | Represents an immutable version of the rules governing a transaction scope.
+-- A policy must not become active merely because the backend wrote a new version.
+template PolicyVersion
+  with
+    operator : Party                  -- Platform operator
+    institution : Party               -- Governing institutional entity
+    policyRef : PolicyRef             -- Policy identifier and version
+    applicableAssets : [AssetId]      -- Which assets this policy covers
+    applicableBeneficiaryScopes : [Text] -- Beneficiary scope tags
+    singleTransferLimit : Quantity    -- Max single transfer
+    dailyLimit : Quantity             -- Daily rolling limit
+    requiredApprovals : Int           -- Number of approvals required
+    separationOfDuties : Bool         -- Whether initiator cannot self-approve
+    effectiveFrom : Time              -- When policy takes effect
+    expiresAt : Optional Time         -- When policy expires
+    emergencyHoldEnabled : Bool       -- Whether emergency holds are allowed
+    approvalEvidence : [EvidenceRef]  -- Required policy approval evidence
+    supersededBy : Optional PolicyRef -- Reference to newer policy, if any
+    active : Bool                     -- Whether this is the active version
+  where
+    signatory operator, institution
+    -- No observers by default — visibility is through authorized queries
+
+    -- Supersede this policy with a newer version.
+    choice SupersedePolicy : ContractId PolicyVersion
+      with
+        newPolicyRef : PolicyRef
+        updater : Party
+      controller updater
+      do
+        assertMsg "Updater must be operator" $ updater == operator
+        assertMsg "Policy already superseded" $ supersededBy == None
+        create this with
+          supersededBy = Some newPolicyRef
+          active = False
+
+    -- Deactivate this policy (e.g., on expiration).
+    choice DeactivatePolicy : ContractId PolicyVersion
+      with
+        deactivator : Party
+      controller deactivator
+      do
+        assertMsg "Deactivator must be operator" $ deactivator == operator
+        assertMsg "Policy already inactive" active
+        create this with active = False
+
+
+-- | Represents a proposed change to a mandate, beneficiary, or policy.
+-- Supports proposal, review, approval, rejection, activation, and expiration.
+-- An initiator cannot approve their own change when independent authorization is required.
+template PolicyChangeRequest
+  with
+    operator : Party               -- Platform operator
+    institution : Party            -- Governing institution
+    proposer : Party               -- Who proposed this change
+    changeId : Text                -- Unique change identifier
+    changeType : Text              -- "PolicyUpdate", "BeneficiaryAdd", "MandateAmend", etc.
+    currentPolicyRef : PolicyRef   -- Policy version being changed
+    proposedChanges : Text         -- JSON-encoded change specification
+    requiredApprovals : Int        -- How many independent approvals needed
+    approvals : [Party]            -- Parties who have approved
+    rejections : [Party]           -- Parties who have rejected
+    eligibleApprovers : [Party]    -- Eligible independent approvers
+    state : ChangeState            -- Current state
+    proposedAt : Time              -- When proposed
+    expiresAt : Time               -- When this request expires
+    requiresIndependentApproval : Bool -- Separation of duties
+  where
+    signatory operator, institution
+    observer proposer :: (approvals ++ rejections ++ eligibleApprovers)
+
+    -- Approve this policy change. Enforces separation of duties.
+    choice ApprovePolicyChange : ContractId PolicyChangeRequest
+      with
+        approver : Party
+        approvalTime : Time
+      controller approver
+      do
+        -- Enforce separation of duties: proposer cannot approve own change
+        assertMsg "Self-approval is not permitted when independent authorization is required" $
+          not requiresIndependentApproval || approver /= proposer
+        assertMsg "Approver already approved" $ approver `notElem` approvals
+        assertMsg "Change is not in reviewable state" $
+          state == Proposed || state == UnderReview
+        assertMsg "Change has expired" $ approvalTime < expiresAt
+        let newApprovals = approver :: approvals
+        let newState = if length newApprovals >= requiredApprovals
+              then ChangeApproved
+              else UnderReview
+        create this with
+          approvals = newApprovals
+          state = newState
+
+    -- Reject this policy change.
+    choice RejectPolicyChange : ContractId PolicyChangeRequest
+      with
+        rejector : Party
+        reason : Text
+      controller rejector
+      do
+        assertMsg "Change is not in reviewable state" $
+          state == Proposed || state == UnderReview
+        create this with
+          rejections = rejector :: rejections
+          state = ChangeRejected
+
+    -- Activate an approved change. Only operator can activate.
+    choice ActivatePolicyChange : ContractId PolicyChangeRequest
+      with
+        activator : Party
+      controller activator
+      do
+        assertMsg "Activator must be operator" $ activator == operator
+        assertMsg "Change is not approved" $ state == ChangeApproved
+        create this with state = Activated
+
+    -- Expire a stale change request.
+    choice ExpirePolicyChange : ContractId PolicyChangeRequest
+      with
+        currentTime : Time
+      controller operator
+      do
+        assertMsg "Change has not expired yet" $ currentTime >= expiresAt
+        assertMsg "Change is already terminal" $
+          state /= ChangeRejected && state /= Activated && state /= ChangeExpired
+        create this with state = ChangeExpired

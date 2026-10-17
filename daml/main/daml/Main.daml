@@ -1,0 +1,10 @@
+-- | MandateGuard — Main Module
+-- Re-exports all MandateGuard domain modules.
+module Main where
+
+import MandateGuard.Types
+import MandateGuard.Identity
+import MandateGuard.Policy
+import MandateGuard.Transfer
+import MandateGuard.Emergency
+import MandateGuard.Asset

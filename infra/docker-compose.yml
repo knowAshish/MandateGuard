@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # PostgreSQL for durable non-authoritative projections & idempotency tracking
+  postgres:
+    image: postgres:16-alpine
+    container_name: mandateguard-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mandateguard
+      POSTGRES_PASSWORD: mandateguard_dev_password
+      POSTGRES_DB: mandateguard_projections
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mandateguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # MandateGuard API Backend Server
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    container_name: mandateguard-api
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      CANTON_LEDGER_BASE_URL: ${CANTON_LEDGER_BASE_URL:-http://127.0.0.1:7575}
+      CANTON_LEDGER_TOKEN: ${CANTON_LEDGER_TOKEN:-}
+      OPERATOR_PARTY: ${OPERATOR_PARTY:-Operator}
+      INSTITUTION_PARTY: ${INSTITUTION_PARTY:-InstA}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # MandateGuard React Operations Console
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+    container_name: mandateguard-web
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

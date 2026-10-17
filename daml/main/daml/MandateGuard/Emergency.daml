@@ -1,0 +1,180 @@
+-- | MandateGuard — Emergency Containment
+-- Templates for EmergencyHold, ContainmentApproval, and IncidentCase.
+module MandateGuard.Emergency where
+
+import MandateGuard.Types
+
+-- | Represents a governed restriction on a defined asset, account, or mandate scope.
+-- A request for a hold is NOT equivalent to a successfully enforced hold.
+-- A confirmed hold must affect the actual protected transfer authorization path.
+template EmergencyHold
+  with
+    operator : Party                 -- Platform operator
+    institution : Party              -- Governing institution
+    holdInitiator : Party            -- Security operator who requested the hold
+    holdId : Text                    -- Unique hold identifier
+    scope : Text                     -- What is being held: "Mandate:xxx", "Asset:yyy", etc.
+    scopeRef : MandateRef            -- Mandate being held
+    reason : Text                    -- Reason for the hold
+    effectiveFrom : Time             -- When the hold becomes effective
+    expiresAt : Optional Time        -- When the hold expires (if time-limited)
+    requiredApprovals : Int          -- How many approvals needed for dual control
+    approvals : [Party]              -- Parties who have approved
+    eligibleApprovers : [Party]      -- Parties eligible to approve containment
+    state : HoldState                -- Current hold state
+    releaseConditions : Text         -- What must happen for the hold to be released
+    releasedBy : Optional Party      -- Who released the hold
+    releaseReason : Optional Text    -- Why the hold was released
+  where
+    signatory operator, institution
+    observer holdInitiator :: (approvals ++ eligibleApprovers)
+
+    -- Approve this emergency hold (dual control).
+    choice ApproveHold : ContractId EmergencyHold
+      with
+        approver : Party
+        approvalTime : Time
+      controller approver
+      do
+        -- Dual control: single actor cannot complete the hold process alone
+        assertMsg "Approver has already approved" $ approver `notElem` approvals
+        assertMsg "Hold is not in requested state" $ state == HoldRequested
+        let newApprovals = approver :: approvals
+        let newState = if length newApprovals >= requiredApprovals
+              then HoldActive
+              else HoldRequested
+        create this with
+          approvals = newApprovals
+          state = newState
+
+    -- Release the hold through a controlled workflow.
+    choice ReleaseHold : ContractId EmergencyHold
+      with
+        releaser : Party
+        releaseReasonText : Text
+      controller releaser
+      do
+        assertMsg "Releaser must be operator or institution" $
+          releaser == operator || releaser == institution
+        assertMsg "Hold is not active" $ state == HoldActive
+        create this with
+          state = HoldReleased
+          releasedBy = Some releaser
+          releaseReason = Some releaseReasonText
+
+    -- Expire a time-limited hold.
+    choice ExpireHold : ContractId EmergencyHold
+      with
+        currentTime : Time
+      controller operator
+      do
+        case expiresAt of
+          None -> abort "Hold has no expiration"
+          Some expiry -> do
+            assertMsg "Hold has not expired yet" $ currentTime >= expiry
+            assertMsg "Hold is already terminal" $
+              state /= HoldReleased && state /= HoldExpired
+            create this with state = HoldExpired
+
+
+-- | Represents the independent authorization required for sensitive containment actions.
+-- Where the policy requires dual control, no single actor may complete the approval process.
+template ContainmentApproval
+  with
+    operator : Party
+    institution : Party
+    holdId : Text                 -- Which hold this approval relates to
+    approver : Party              -- Who is approving
+    approvalType : Text           -- Type of containment action
+    reason : Text                 -- Justification
+    approvalTime : Time
+    evidenceRef : EvidenceRef
+  where
+    signatory operator, institution
+    observer approver
+
+
+-- | Represents a security event with related request references,
+-- evidence, response actions, and final resolution.
+-- Does not expose unrelated transaction details to parties who lack visibility.
+template IncidentCase
+  with
+    operator : Party
+    institution : Party
+    securityOperator : Party        -- The security operator managing this incident
+    incidentId : Text               -- Unique incident identifier
+    severity : Text                 -- "Critical", "High", "Medium", "Low"
+    description : Text
+    relatedRequests : [Text]        -- Request references related to this incident
+    relatedHolds : [Text]           -- Hold IDs related to this incident
+    evidenceRefs : [EvidenceRef]    -- Evidence collected
+    responseActions : [Text]        -- Actions taken
+    state : IncidentState           -- Current incident state
+    openedAt : Time
+    resolvedAt : Optional Time
+    resolution : Optional Text      -- Final resolution description
+  where
+    signatory operator, institution
+    observer securityOperator
+
+    -- Advance incident state to investigating.
+    choice StartInvestigation : ContractId IncidentCase
+      with
+        investigator : Party
+      controller investigator
+      do
+        assertMsg "Investigator must be security operator" $
+          investigator == securityOperator || investigator == operator
+        assertMsg "Incident must be open" $ state == IncidentOpen
+        create this with state = IncidentInvestigating
+
+    -- Mark incident as contained.
+    choice ContainIncident : ContractId IncidentCase
+      with
+        containedBy : Party
+        actions : [Text]
+      controller containedBy
+      do
+        assertMsg "Must be investigating" $ state == IncidentInvestigating
+        create this with
+          state = IncidentContained
+          responseActions = responseActions ++ actions
+
+    -- Add evidence to the incident.
+    choice AddIncidentEvidence : ContractId IncidentCase
+      with
+        addedBy : Party
+        evidence : EvidenceRef
+      controller addedBy
+      do
+        assertMsg "Must be operator or security operator" $
+          addedBy == operator || addedBy == securityOperator
+        create this with
+          evidenceRefs = evidence :: evidenceRefs
+
+    -- Resolve the incident.
+    choice ResolveIncident : ContractId IncidentCase
+      with
+        resolver : Party
+        resolveTime : Time
+        resolutionText : Text
+      controller resolver
+      do
+        assertMsg "Resolver must be operator or security operator" $
+          resolver == operator || resolver == securityOperator
+        assertMsg "Incident not in resolvable state" $
+          state == IncidentContained || state == IncidentInvestigating
+        create this with
+          state = IncidentResolved
+          resolvedAt = Some resolveTime
+          resolution = Some resolutionText
+
+    -- Close the incident (final state).
+    choice CloseIncident : ContractId IncidentCase
+      with
+        closedBy : Party
+      controller closedBy
+      do
+        assertMsg "Closer must be operator" $ closedBy == operator
+        assertMsg "Incident must be resolved" $ state == IncidentResolved
+        create this with state = IncidentClosed

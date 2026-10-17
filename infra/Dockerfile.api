@@ -1,0 +1,25 @@
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+COPY package*.json ./
+COPY tsconfig.base.json ./
+COPY packages/ ./packages/
+COPY apps/api/ ./apps/api/
+
+RUN npm install
+RUN npm --workspace=@mandateguard/domain run build
+RUN npm --workspace=@mandateguard/audit run build
+RUN npm --workspace=@mandateguard/policy-engine run build
+RUN npm --workspace=@mandateguard/projections run build
+RUN npm --workspace=@mandateguard/ledger-client run build
+RUN npm --workspace=@mandateguard/api run build
+
+FROM node:24-alpine AS runner
+WORKDIR /app
+COPY --from=builder /app /app
+
+ENV NODE_ENV=production
+ENV PORT=4000
+EXPOSE 4000
+
+CMD ["node", "apps/api/dist/index.js"]

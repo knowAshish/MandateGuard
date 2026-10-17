@@ -1,0 +1,45 @@
+name: MandateGuard CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Build & Verify Control Plane
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Monorepo Dependencies
+        run: npm ci
+
+      - name: Build TypeScript Packages & Applications
+        run: npm run build
+
+      - name: Execute Monorepo Unit & Security Review Suites
+        run: npm test
+
+      - name: Verify Web Production Bundle
+        run: npm --workspace=@mandateguard/web run build
+
+      - name: Security Check: Verify No Committed Secrets
+        run: |
+          echo "Scanning for accidental credential leaks..."
+          ! grep -rE "BEGIN (RSA|EC|PRIVATE) KEY" --exclude-dir={node_modules,.git,dist} .
+          ! grep -rE "ghp_[A-Za-z0-9_]{36}" --exclude-dir={node_modules,.git,dist} .
+          echo "Secret scan clean."

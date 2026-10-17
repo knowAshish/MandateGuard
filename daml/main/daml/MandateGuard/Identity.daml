@@ -1,0 +1,155 @@
+-- | MandateGuard — Institutional Identity and Authority
+-- Templates for InstitutionalMandate, RoleAssignment, and BeneficiaryMandate.
+module MandateGuard.Identity where
+
+import MandateGuard.Types
+
+-- | Represents the authorized transfer mandate for an institutional entity.
+-- Only the required authorized parties are stakeholders.
+template InstitutionalMandate
+  with
+    operator : Party                  -- Platform operator
+    institution : Party               -- The mandated institutional entity
+    mandateRef : MandateRef           -- Unique mandate reference
+    authorizedAssets : [AssetId]      -- Authorized asset scope
+    permittedTransactionTypes : [Text] -- e.g., ["Transfer", "Redemption"]
+    permittedBeneficiaryScope : [Text] -- Beneficiary registry scope tags
+    maxSingleTransfer : Quantity      -- Maximum single-transfer amount
+    dailyLimit : Quantity             -- Applicable rolling/daily limit
+    requiredApprovals : Int           -- Required approval threshold
+    effectivePolicyRef : PolicyRef    -- Effective policy version
+    effectiveFrom : Time              -- Effective start
+    expiresAt : Optional Time         -- Expiration
+    revoked : Bool                    -- Revocation state
+    governanceApprovers : [Party]     -- Required governance approvals
+  where
+    signatory operator, institution
+    observer governanceApprovers
+
+    -- Revoke this mandate. Requires both operator and institution.
+    choice RevokeMandate : ContractId InstitutionalMandate
+      with
+        revoker : Party
+        reason : Text
+      controller revoker
+      do
+        assertMsg "Revoker must be operator or institution" $
+          revoker == operator || revoker == institution
+        assertMsg "Mandate already revoked" $ not revoked
+        create this with revoked = True
+
+    -- Update the effective policy version for this mandate.
+    choice UpdateMandatePolicy : ContractId InstitutionalMandate
+      with
+        newPolicyRef : PolicyRef
+        updater : Party
+      controller updater
+      do
+        assertMsg "Updater must be operator" $ updater == operator
+        assertMsg "Mandate is revoked" $ not revoked
+        create this with effectivePolicyRef = newPolicyRef
+
+    -- Update permitted beneficiary scope.
+    choice UpdateBeneficiaryScope : ContractId InstitutionalMandate
+      with
+        newScope : [Text]
+        updater : Party
+      controller updater
+      do
+        assertMsg "Updater must be operator" $ updater == operator
+        assertMsg "Mandate is revoked" $ not revoked
+        create this with permittedBeneficiaryScope = newScope
+
+    -- Update transfer limits.
+    choice UpdateLimits : ContractId InstitutionalMandate
+      with
+        newMaxSingle : Quantity
+        newDailyLimit : Quantity
+        updater : Party
+      controller updater
+      do
+        assertMsg "Updater must be operator" $ updater == operator
+        assertMsg "Mandate is revoked" $ not revoked
+        create this with
+          maxSingleTransfer = newMaxSingle
+          dailyLimit = newDailyLimit
+
+
+-- | Represents a versioned authorization assignment linking a governed identity
+-- to permitted business operations and the relevant institutional party.
+template RoleAssignment
+  with
+    operator : Party             -- Platform operator
+    institution : Party          -- Governing institution
+    assignee : Party             -- The party receiving the role
+    roleType : RoleType          -- The business role
+    assignedScope : [MandateRef] -- Which mandates this role covers
+    version : Int                -- Version for tracking changes
+    effectiveFrom : Time         -- When this assignment becomes effective
+    expiresAt : Optional Time    -- When this assignment expires
+    revoked : Bool               -- Whether revoked
+    revokedAt : Optional Time    -- Revocation timestamp
+  where
+    signatory operator, institution
+    observer assignee
+
+    -- Revoke this role assignment.
+    choice RevokeRole : ContractId RoleAssignment
+      with
+        revoker : Party
+        revokeTime : Time
+        reason : Text
+      controller revoker
+      do
+        assertMsg "Revoker must be operator or institution" $
+          revoker == operator || revoker == institution
+        assertMsg "Role already revoked" $ not revoked
+        create this with
+          revoked = True
+          revokedAt = Some revokeTime
+
+
+-- | Represents an approved beneficiary with transfer constraints.
+-- Uses a unique registryId, not just a display name.
+template BeneficiaryMandate
+  with
+    operator : Party             -- Platform operator
+    institution : Party          -- Governing institution
+    beneficiary : BeneficiaryId  -- Unique beneficiary identifier
+    permittedAssets : [AssetId]  -- Which assets can be sent
+    maxTransferAmount : Optional Quantity -- Per-transfer limit for this beneficiary
+    effectiveFrom : Time         -- Validity start
+    expiresAt : Optional Time    -- Validity end
+    revoked : Bool               -- Revocation state
+    version : Int                -- Version for tracking amendments
+    approvedBy : [Party]         -- Who approved this beneficiary
+  where
+    signatory operator, institution
+    observer approvedBy
+
+    -- Revoke this beneficiary authorization.
+    choice RevokeBeneficiary : ContractId BeneficiaryMandate
+      with
+        revoker : Party
+        reason : Text
+      controller revoker
+      do
+        assertMsg "Revoker must be operator or institution" $
+          revoker == operator || revoker == institution
+        assertMsg "Beneficiary already revoked" $ not revoked
+        create this with revoked = True
+
+    -- Amend beneficiary constraints (creates new version).
+    choice AmendBeneficiary : ContractId BeneficiaryMandate
+      with
+        newPermittedAssets : [AssetId]
+        newMaxTransfer : Optional Quantity
+        amender : Party
+      controller amender
+      do
+        assertMsg "Amender must be operator" $ amender == operator
+        assertMsg "Beneficiary is revoked" $ not revoked
+        create this with
+          permittedAssets = newPermittedAssets
+          maxTransferAmount = newMaxTransfer
+          version = version + 1

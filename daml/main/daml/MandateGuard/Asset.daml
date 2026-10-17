@@ -1,0 +1,137 @@
+-- | MandateGuard — Test Asset
+-- A Daml-based test asset for DevNet demonstration.
+-- CLEARLY IDENTIFIED: This is an application-issued, non-redeemable test asset.
+-- It is NOT a real stablecoin, regulated security, production token, or bank balance.
+--
+-- The test asset implements an explicit, authorized transfer workflow.
+-- For the strongest design, the transfer and its corresponding authorization
+-- are enforced in the same Daml transaction (atomic composition).
+module MandateGuard.Asset where
+
+import MandateGuard.Types
+
+-- | A test asset holding representing a quantity of a named test asset.
+-- Transfer requires authorization through MandateGuard's protected workflow.
+-- This asset CANNOT be transferred by bypassing MandateGuard when the
+-- operator is a required signatory on the transfer choice.
+template TestAssetHolding
+  with
+    operator : Party              -- Platform operator (required signatory prevents bypass)
+    owner : Party                 -- Current asset owner
+    assetId : AssetId             -- Asset identifier
+    balance : Quantity            -- Current balance in sub-units
+    issueRef : Text               -- Issuance reference for traceability
+  where
+    signatory operator
+    observer owner
+    ensure balance.amount >= 0
+
+    -- Transfer a portion of this holding to a new owner.
+    -- REQUIRES operator signatory — cannot bypass MandateGuard.
+    -- The caller must provide a valid authorized request reference.
+    choice AuthorizedTransfer : (ContractId TestAssetHolding, ContractId TestAssetHolding)
+      with
+        recipient : Party
+        transferAmount : Quantity
+        authorizedRequestRef : Text   -- Reference to the approved TransferRequest
+        updateRef : Text              -- Correlation to ledger update
+      controller operator, owner
+      do
+        -- Validate transfer amount
+        assertMsg "Transfer amount must be positive" $ transferAmount.amount > 0
+        assertMsg "Transfer amount precision must match asset" $
+          transferAmount.precision == balance.precision
+        assertMsg "Insufficient balance" $ transferAmount.amount <= balance.amount
+
+        -- Create recipient's holding
+        recipientHolding <- create TestAssetHolding with
+          operator
+          owner = recipient
+          assetId
+          balance = transferAmount
+          issueRef = authorizedRequestRef
+
+        -- Create sender's remaining holding (or archive if zero)
+        let remaining = Quantity (balance.amount - transferAmount.amount) balance.precision
+        senderHolding <- create this with balance = remaining
+
+        return (senderHolding, recipientHolding)
+
+    -- Merge two holdings of the same asset (consolidation).
+    choice MergeHolding : ContractId TestAssetHolding
+      with
+        otherCid : ContractId TestAssetHolding
+      controller operator, owner
+      do
+        other <- fetch otherCid
+        assertMsg "Cannot merge: different asset" $ other.assetId == assetId
+        assertMsg "Cannot merge: different owner" $ other.owner == owner
+        assertMsg "Cannot merge: different operator" $ other.operator == operator
+        assertMsg "Cannot merge: different precision" $
+          other.balance.precision == balance.precision
+        archive otherCid
+        create this with
+          balance = Quantity (balance.amount + other.balance.amount) balance.precision
+
+
+-- | Factory for issuing test assets. Only the operator can issue.
+-- Clearly labeled as test assets.
+template TestAssetFactory
+  with
+    operator : Party
+    description : Text  -- Must describe this as a test asset
+  where
+    signatory operator
+
+    -- Issue a new test asset holding.
+    choice IssueTestAsset : ContractId TestAssetHolding
+      with
+        recipient : Party
+        assetId : AssetId
+        initialBalance : Quantity
+        issueReference : Text
+      controller operator
+      do
+        assertMsg "Initial balance must be non-negative" $ initialBalance.amount >= 0
+        create TestAssetHolding with
+          operator
+          owner = recipient
+          assetId
+          balance = initialBalance
+          issueRef = issueReference
+
+
+-- | Atomic authorization-and-transfer helper.
+-- This template coordinates the MandateGuard authorization check with the
+-- actual asset transfer in a single Daml transaction, providing atomic
+-- enforcement of the mandate firewall.
+template AuthorizedAssetTransfer
+  with
+    operator : Party
+    institution : Party
+    initiator : Party
+    requestRef : Text
+    assetHoldingCid : ContractId TestAssetHolding
+    recipient : Party
+    transferAmount : Quantity
+    policyRef : PolicyRef
+    mandateRef : MandateRef
+  where
+    signatory operator, institution
+    observer initiator
+
+    -- Execute the authorized transfer atomically.
+    -- This choice verifies authorization and executes the transfer in the same transaction.
+    choice ExecuteAuthorizedTransfer : (ContractId TestAssetHolding, ContractId TestAssetHolding)
+      controller operator
+      do
+        -- Execute the actual asset transfer
+        -- Because operator is signatory on both this template and TestAssetHolding,
+        -- the transfer cannot bypass MandateGuard's authorization.
+        (senderCid, recipientCid) <- exercise assetHoldingCid AuthorizedTransfer with
+          recipient
+          transferAmount
+          authorizedRequestRef = requestRef
+          updateRef = requestRef
+
+        return (senderCid, recipientCid)

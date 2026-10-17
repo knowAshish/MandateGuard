@@ -1,0 +1,10 @@
+sdk-version: 3.6.0
+name: mandateguard-test
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../main/.daml/dist/mandateguard-0.1.0.dar

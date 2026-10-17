@@ -1,0 +1,23 @@
+{
+  "name": "@mandateguard/api",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "node dist/index.js",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "dependencies": {
+    "@mandateguard/domain": "^0.1.0",
+    "@mandateguard/ledger-client": "^0.1.0",
+    "@mandateguard/policy-engine": "^0.1.0",
+    "@mandateguard/audit": "^0.1.0",
+    "@mandateguard/projections": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "@types/node": "^20.12.7"
+  }
+}

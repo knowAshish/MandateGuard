@@ -1,0 +1,234 @@
+-- | MandateGuard — Transaction Authorization
+-- Templates for TransferRequest, ApprovalRecord, AuthorizationDecision, and ExecutionReceipt.
+module MandateGuard.Transfer where
+
+import MandateGuard.Types
+
+-- | Represents a proposed protected asset transfer.
+-- A transfer request is NOT a completed transfer.
+template TransferRequest
+  with
+    operator : Party                  -- Platform operator
+    institution : Party               -- Initiating institutional party
+    initiator : Party                 -- The party who created this request
+    requestRef : Text                 -- Unique request reference
+    assetId : AssetId                 -- Governed asset reference
+    assetContractRef : Optional Text  -- Actual asset contract ID if known
+    beneficiary : BeneficiaryId       -- Destination beneficiary
+    quantity : Quantity               -- Requested quantity
+    mandateRef : MandateRef           -- Applicable mandate
+    policyRef : PolicyRef             -- Applicable policy version at creation
+    createdAt : Time                  -- Request creation time
+    expiresAt : Time                  -- Request expiration
+    requiredApprovals : Int           -- Required approval threshold
+    currentApprovals : [Party]        -- Parties who have approved
+    eligibleApprovers : [Party]       -- Parties eligible to approve/reject
+    state : RequestState              -- Current contractual state
+    evidenceRefs : [EvidenceRef]      -- Evidence references
+    executionOutcome : Optional Text  -- Final execution outcome, when confirmed
+    executionUpdateId : Optional Text -- Actual ledger update ID on confirmed execution
+  where
+    signatory operator, institution
+    observer initiator :: (currentApprovals ++ eligibleApprovers)
+
+    -- Submit an approval for this transfer request.
+    -- Enforces self-approval prevention: initiator cannot approve their own request.
+    choice ApproveTransfer : (ContractId TransferRequest, ContractId ApprovalRecord)
+      with
+        approver : Party
+        decision : ApprovalDecision
+        reason : Text
+        approvalTime : Time
+        approvalPolicyRef : PolicyRef
+        evidenceRef : EvidenceRef
+      controller approver
+      do
+        -- Self-approval prevention
+        assertMsg "Self-approval is not permitted: initiator cannot approve their own request" $
+          approver /= initiator
+        -- State check
+        assertMsg "Request is not in approvable state" $
+          state == Pending || state == AwaitingApproval
+        -- Expiration check
+        assertMsg "Request has expired" $ approvalTime < expiresAt
+        -- Duplicate approval check
+        assertMsg "Approver has already approved this request" $
+          approver `notElem` currentApprovals
+        -- Policy version consistency
+        assertMsg "Approval must reference the same policy version as the request" $
+          approvalPolicyRef == policyRef
+
+        -- Create the approval record
+        approvalCid <- create ApprovalRecord with
+          operator
+          institution
+          requestRef
+          approver
+          decision
+          approvedQuantity = quantity
+          approvedBeneficiary = beneficiary
+          approvedAssetId = assetId
+          policyRef = approvalPolicyRef
+          reason
+          approvalTime
+          evidenceRef
+
+        -- Update request state
+        let newApprovals = if decision == Approve
+              then approver :: currentApprovals
+              else currentApprovals
+        let newState = case decision of
+              Reject -> Rejected
+              Approve ->
+                if length newApprovals >= requiredApprovals
+                  then Approved
+                  else AwaitingApproval
+        requestCid <- create this with
+          currentApprovals = newApprovals
+          state = newState
+          evidenceRefs = evidenceRef :: evidenceRefs
+
+        return (requestCid, approvalCid)
+
+    -- Mark request as executing (operator submitting to ledger).
+    choice MarkExecuting : ContractId TransferRequest
+      controller operator
+      do
+        assertMsg "Request must be Approved to execute" $ state == Approved
+        create this with state = Executing
+
+    -- Record confirmed execution with actual ledger identifiers.
+    choice ConfirmExecution : (ContractId TransferRequest, ContractId ExecutionReceipt)
+      with
+        updateId : Text        -- Actual ledger update/transaction ID
+        assetContractId : Text -- Actual asset contract reference
+        outcome : ExecutionOutcome
+        evidenceRef : EvidenceRef
+        confirmTime : Time
+      controller operator
+      do
+        assertMsg "Request must be Executing or Approved" $
+          state == Executing || state == Approved
+
+        receiptCid <- create ExecutionReceipt with
+          operator
+          institution
+          requestRef
+          updateId
+          assetContractRef = assetContractId
+          assetId
+          beneficiary
+          quantity
+          outcome
+          evidenceRef
+          confirmedAt = confirmTime
+          policyRef
+
+        requestCid <- create this with
+          state = case outcome of
+            ExecutionSuccess -> Confirmed
+            ExecutionFailed -> Rejected
+            ExecutionUnknown -> Executing
+          executionOutcome = Some (show outcome)
+          executionUpdateId = Some updateId
+          assetContractRef = Some assetContractId
+          evidenceRefs = evidenceRef :: evidenceRefs
+
+        return (requestCid, receiptCid)
+
+    -- Expire a stale request.
+    choice ExpireRequest : ContractId TransferRequest
+      with
+        currentTime : Time
+      controller operator
+      do
+        assertMsg "Request has not expired yet" $ currentTime >= expiresAt
+        assertMsg "Request is already terminal" $
+          state /= Confirmed && state /= Rejected && state /= Expired
+        create this with state = Expired
+
+    -- Place request on hold due to emergency.
+    choice PlaceOnHold : ContractId TransferRequest
+      with
+        holdReason : Text
+      controller operator
+      do
+        assertMsg "Request is in terminal state" $
+          state /= Confirmed && state /= Rejected && state /= Expired
+        create this with state = OnHold
+
+    -- Release from hold.
+    choice ReleaseFromHold : ContractId TransferRequest
+      with
+        releaseReason : Text
+        restoreState : RequestState
+      controller operator
+      do
+        assertMsg "Request is not on hold" $ state == OnHold
+        assertMsg "Cannot restore to terminal state" $
+          restoreState /= Confirmed && restoreState /= Rejected && restoreState /= Expired
+        create this with state = restoreState
+
+
+-- | Represents an approval or rejection associated with a specific request version.
+-- An approval is invalid for any material transaction change.
+template ApprovalRecord
+  with
+    operator : Party
+    institution : Party
+    requestRef : Text             -- Which request this approval covers
+    approver : Party              -- The approving party
+    decision : ApprovalDecision   -- Approve or Reject
+    approvedQuantity : Quantity   -- The quantity approved
+    approvedBeneficiary : BeneficiaryId -- The beneficiary approved
+    approvedAssetId : AssetId     -- The asset approved
+    policyRef : PolicyRef         -- The policy version at approval time
+    reason : Text                 -- Decision reason
+    approvalTime : Time           -- When the decision was made
+    evidenceRef : EvidenceRef     -- Evidence reference
+  where
+    signatory operator, institution
+    observer approver
+
+
+-- | Represents the result of evaluating a transfer request against a policy.
+template AuthorizationDecision
+  with
+    operator : Party
+    institution : Party
+    requestRef : Text
+    policyRef : PolicyRef
+    outcome : AuthorizationOutcome
+    requiredApprovalCount : Int
+    completedApprovalCount : Int
+    limitChecks : [LimitCheckResult]
+    beneficiaryCheck : Bool
+    expirationCheck : Bool
+    holdCheck : Bool
+    revocationCheck : Bool
+    reasonCodes : [ReasonCode]
+    decisionTime : Time
+    requestVersion : Int          -- Which version of the request was evaluated
+  where
+    signatory operator, institution
+
+
+-- | Represents a verified association between an authorized request
+-- and an actual successful asset-transfer operation.
+-- Never create a successful receipt before the ledger operation actually succeeded.
+template ExecutionReceipt
+  with
+    operator : Party
+    institution : Party
+    requestRef : Text             -- Request reference
+    updateId : Text               -- Actual ledger update/transaction ID
+    assetContractRef : Text       -- Actual asset contract reference
+    assetId : AssetId
+    beneficiary : BeneficiaryId
+    quantity : Quantity
+    outcome : ExecutionOutcome
+    evidenceRef : EvidenceRef
+    confirmedAt : Time
+    policyRef : PolicyRef
+  where
+    signatory operator, institution
