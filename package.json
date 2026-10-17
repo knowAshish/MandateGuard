@@ -8,7 +8,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace=@mandateguard/domain && npm run build --workspace=@mandateguard/audit && npm run build --workspace=@mandateguard/ledger-client && npm run build --workspace=@mandateguard/policy-engine && npm run build --workspace=@mandateguard/projections && npm run build --workspace=@mandateguard/api && npm run build --workspace=@mandateguard/web",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "codegen": "dpm codegen-js -o packages/daml-ledger daml/main/.daml/dist/mandateguard-0.1.0.dar",
