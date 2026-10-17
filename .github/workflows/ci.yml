@@ -37,7 +37,7 @@ jobs:
       - name: Verify Web Production Bundle
         run: npm --workspace=@mandateguard/web run build
 
-      - name: Security Check: Verify No Committed Secrets
+      - name: "Security Check: Verify No Committed Secrets"
         run: |
           echo "Scanning for accidental credential leaks..."
           ! grep -rE "BEGIN (RSA|EC|PRIVATE) KEY" --exclude-dir={node_modules,.git,dist} .
