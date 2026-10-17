@@ -2,23 +2,78 @@
 
 **Institutional Digital-Asset Mandate Firewall & Transaction Authorization Control Plane for Canton Network**
 
-[![Canton Network](https://img.shields.io/badge/Canton_Network-v3.6.1_Runtime-8A2BE2.svg?style=flat-square)](https://canton.io)
-[![Daml Smart Contracts](https://img.shields.io/badge/Daml_Smart_Contracts-3.6.0_%2F_3.6.2-blue.svg?style=flat-square)](https://daml.com)
-[![DPM](https://img.shields.io/badge/dpm-v1.0.22-00B0FF.svg?style=flat-square)](https://docs.daml.com)
-[![Daml Script Tests](https://img.shields.io/badge/Daml_Script_Tests-18%2F18_Passed_(100%25)-brightgreen.svg?style=flat-square)](docs/verification-report.md#2-layer-a-daml-contract-test-suite-dpm-test)
-[![Monorepo & Security Tests](https://img.shields.io/badge/TS_Security_Tests-32%2F32_Passed_(100%25)-brightgreen.svg?style=flat-square)](docs/verification-report.md#3-layer-b-typescript-monorepo--backend-tests)
-[![Node.js Runtime](https://img.shields.io/badge/Node.js-%3E=_20.0.0_(v24.4.1)-339933.svg?style=flat-square)](https://nodejs.org)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat-square)](LICENSE)
+[![Canton Network](https://img.shields.io/badge/Canton_Network-v3.6.1_Runtime-8A2BE2.svg)](https://canton.io)
+[![Daml Smart Contracts](https://img.shields.io/badge/Daml_Smart_Contracts-3.6.0-blue.svg)](https://daml.com)
+[![Daml Script Tests](https://img.shields.io/badge/Daml_Script_Tests-18%2F18_Passed-brightgreen.svg)](docs/verification-report.md)
+[![TypeScript Tests](https://img.shields.io/badge/TypeScript_Tests-32%2F32_Passed-brightgreen.svg)](docs/verification-report.md)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+> **Project status:** Daml Script and TypeScript test results have been verified in the development environment, and the GitHub Actions build/test workflow has passed. A live Canton DevNet deployment is not claimed as verified.
+
+## What is MandateGuard?
+
+MandateGuard is an independent engineering project that explores how institutional digital-asset transfers can be governed through Daml smart contracts, mandate-based authorization, separation of duties, independent approvals, transaction limits, emergency controls, and auditable evidence.
+
+It combines smart-contract logic with an application control plane to demonstrate how authorization requirements can be represented, tested, and inspected across an institutional transaction workflow.
+
+## Key Capabilities
+
+- **Mandate-based authorization** — evaluate transaction requests against configured authorization rules.
+- **Separation of duties** — model independent initiation and approval responsibilities.
+- **Multi-party approval** — demonstrate workflows requiring distinct authorized parties.
+- **Transaction limits** — represent policy checks for transfer amounts and velocity limits.
+- **Emergency controls** — model emergency holds and controlled recovery workflows.
+- **Audit evidence** — support inspection of transaction references and evidence digests.
+- **Operations console** — provide a web interface for exploring the control-plane workflow.
+
+## Technology Stack
+
+| Layer | Technologies |
+|---|---|
+| Smart contracts | Daml |
+| Ledger integration | Canton Ledger API |
+| Backend | Node.js, Express, TypeScript |
+| Frontend | React, Vite, TypeScript |
+| Testing | Daml Script, TypeScript unit and security tests |
+| Build | DPM, npm workspaces |
+| CI | GitHub Actions |
+
+## Verification Snapshot
+
+| Check | Result |
+|---|---:|
+| Daml Script scenarios | 18 passed |
+| TypeScript unit and security tests | 32 passed |
+| Web production build | Passed |
+| GitHub Actions build and test workflow | Passed |
+
+See the [Verification Report](docs/verification-report.md) for detailed results and reproduction instructions.
+
+## Quick Start
+
+```bash
+git clone https://github.com/knowAshish/MandateGuard.git
+cd MandateGuard
+npm ci
+npm run build
+npm test
+npm --workspace=@mandateguard/web run build
+```
+
+These commands cover the configured TypeScript workspaces and web application. Daml verification requires DPM and a compatible Daml/Java environment; follow the detailed Daml testing instructions below.
+
+## Project Disclaimer
+
+MandateGuard is an independent engineering and portfolio project. It is not an official product of Digital Asset or the Canton Network. It should not be treated as production-ready custody or settlement infrastructure without independent security, operational, and legal review.
+
 
 ---
 
 ## Executive Overview
 
-**MandateGuard** is an institutional-grade transaction authorization control plane and smart-contract mandate firewall engineered for the **Canton Network** (Canton DevNet / Canton v3.6.1 runtime). It establishes an authoritative, cryptographically enforced contractual perimeter between institutional initiators, treasury controllers, independent approvers, security operators, and on-ledger digital asset holdings.
-
 In traditional digital asset custody architectures, authorization policies and compliance rules are evaluated by off-chain web applications or relational database triggers. If an attacker compromises the web application server, tampers with a SQL database row, or exploits an API proxy, unauthorized transactions can be submitted directly to ledger settlement rails.
 
-MandateGuard eliminates this attack surface by embedding **multi-signature dual control, separation of duties, velocity limit enforcement, and emergency circuit breakers directly inside Daml smart contracts on Canton**. An asset holding contract cannot move funds without presenting an authoritative, on-ledger `TransferRequest` contract verified by distinct cryptographic signatures.
+MandateGuard is designed to reduce reliance on off-chain authorization controls by implementing multi-party approval, separation of duties, transaction-limit checks, and emergency controls in Daml smart contracts on Canton. These controls are intended to help prevent unauthorized transfers, subject to the correctness of the implementation and deployment configuration.
 
 ```
 +---------------------------------------------------------------------------------------------------+
@@ -597,7 +652,7 @@ mandateguard/
 ### Step-by-Step Installation
 ```bash
 # 1. Clone repository
-git clone https://github.com/your-org/MandateGuard.git
+git clone https://github.com/knowAshish/MandateGuard.git
 cd MandateGuard/mandateguard
 
 # 2. Install monorepo dependencies across all packages and apps
